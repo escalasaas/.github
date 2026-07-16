@@ -1,0 +1,104 @@
+name: Changelog
+
+# Reusable workflow: called by each service's deploy.yml after a successful
+# production deploy. Collects the commits that shipped, asks the Ollama
+# instance on the VPS (qwen2.5-coder:7b) to turn them into pt-BR changelog
+# bullets, and posts an embed to the team's Discord changelog channel.
+# Falls back to the raw commit list if the model is unavailable — and the
+# whole job is continue-on-error, so it can never fail a deploy.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Service name shown in the changelog title"
+        required: true
+        type: string
+
+jobs:
+  changelog:
+    name: Post changelog
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect deployed commits
+        id: commits
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if [ -n "$BEFORE" ] && ! echo "$BEFORE" | grep -Eq '^0+$' \
+             && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            git log --no-merges --pretty='- %s' "$BEFORE..${{ github.sha }}" > commits.txt
+          else
+            git log --no-merges -1 --pretty='- %s' "${{ github.sha }}" > commits.txt
+          fi
+          if [ -s commits.txt ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+          cat commits.txt
+
+      - name: Configure SSH
+        if: steps.commits.outputs.skip == 'false'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Summarize with Ollama on the VPS
+        if: steps.commits.outputs.skip == 'false'
+        run: |
+          {
+          cat <<'PROMPT'
+          Você traduz commits em um changelog interno da Escala SaaS, em português do Brasil.
+
+          Glossário do domínio (use exatamente estes termos, não traduza):
+          - closer form = formulário do closer
+          - LP = landing page
+          - OSM, ISM = funções internas (manter as siglas)
+          - onboarding, briefing, copy, squad, task = manter em inglês/como estão
+          - lane = raia; step = etapa; esteira = esteira
+          - carteira = carteira (tela do admin)
+          - comm = time de comunicação
+          - gestor, analista = manter em português
+
+          Regras:
+          - Um bullet começando com • por commit, na mesma ordem.
+          - Frase curta focada no efeito prático para quem usa o sistema.
+          - Não invente nada além do que o commit diz.
+          - Responda SOMENTE com os bullets: sem título, sem numeração, sem comentários.
+
+          PROMPT
+          echo "Commits do serviço ${{ inputs.service }}:"
+          cat commits.txt
+          } > prompt.txt
+          ssh -o ConnectTimeout=15 root@${{ secrets.VPS_HOST }} \
+            'docker exec -i escala-ollama-1 ollama run qwen2.5-coder:7b 2>/dev/null' \
+            < prompt.txt > summary.txt || true
+          # Strip any stray ANSI escapes; fall back to the raw commit list if
+          # the model returned nothing usable.
+          sed -i 's/\x1b\[[0-9;]*[A-Za-z]//g' summary.txt
+          if ! grep -q '•' summary.txt; then
+            cp commits.txt summary.txt
+          fi
+          cat summary.txt
+
+      - name: Post to Discord
+        if: steps.commits.outputs.skip == 'false'
+        run: |
+          head -c 3900 summary.txt > desc.txt
+          jq -n --rawfile desc desc.txt \
+            --arg title "🚀 ${{ inputs.service }} em produção" \
+            --arg footer "${GITHUB_SHA::7} · $(TZ=America/Sao_Paulo date +'%d/%m/%Y %H:%M')" \
+            '{embeds: [{title: $title, description: $desc, color: 5763719, footer: {text: $footer}}]}' \
+            > payload.json
+          curl -sf -X POST -H 'Content-Type: application/json' \
+            -d @payload.json "${{ secrets.DISCORD_CHANGELOG_WEBHOOK_URL }}"

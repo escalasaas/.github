@@ -18,7 +18,7 @@ on:
 jobs:
   changelog:
     name: Post changelog
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     continue-on-error: true
     permissions:
       contents: read

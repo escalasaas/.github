@@ -11,6 +11,12 @@ on:
 jobs:
   changelog:
     name: Post changelog
+    # Off since 19/10/2026: the gmud-vigia on the VPS (infra repo) announces every deploy in
+    # the deploys channel, from what is actually running (version, PR, who merged, health).
+    # This webhook died on 15/10 and every deploy showed a red job; a skipped job also stops
+    # taking a VPS runner for a full-history clone. Set the org variable
+    # CHANGELOG_DISCORD=on (with a working DISCORD_CHANGELOG_WEBHOOK_URL) to bring it back.
+    if: vars.CHANGELOG_DISCORD == 'on'
     runs-on: self-hosted
     continue-on-error: true
     permissions:
